@@ -1,0 +1,19 @@
+syntax = "proto3";
+package feast.core;
+
+option go_package = "github.com/feast-dev/feast/go/protos/feast/core";
+option java_outer_classname = "CalculationProto";
+option java_package = "feast.proto.core";
+
+message Calculation {
+    // The name of this calculated feature.
+    string name = 1;
+
+    // The calculation expression string (SQL-like syntax).
+    // Supports arithmetic (+, -, *, /), comparisons (>, <, >=, <=, ==, !=),
+    // logical operators (AND, OR, NOT), and functions (CASE, COALESCE, DATEDIFF).
+    string expr = 2;
+
+    // User-defined metadata tags associated with this calculation.
+    map<string, string> tags = 3;
+}

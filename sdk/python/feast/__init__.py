@@ -11,6 +11,7 @@ from feast.infra.offline_stores.snowflake_source import SnowflakeSource
 
 from .aggregation import Aggregation
 from .batch_feature_view import BatchFeatureView
+from .calculation import Calculation
 from .data_source import KafkaSource, KinesisSource, PushSource, RequestSource
 from .dataframe import DataFrameEngine, FeastDataFrame
 from .entity import Entity
@@ -35,6 +36,7 @@ except PackageNotFoundError:
 __all__ = [
     "Aggregation",
     "BatchFeatureView",
+    "Calculation",
     "DataFrameEngine",
     "Entity",
     "KafkaSource",
