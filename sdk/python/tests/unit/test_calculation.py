@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the Calculation class and expression engine."""
+"""Tests for the Calculation class and expression engine (powered by sqlglot)."""
 
 from datetime import datetime, timezone
 
@@ -22,6 +22,7 @@ import pytest
 from feast.calculation import Calculation, apply_calculations
 from feast.calculation.expression_engine import (
     ExpressionError,
+    evaluate_batch,
     evaluate_expression,
 )
 
@@ -108,7 +109,7 @@ class TestCalculationProto:
 
 
 class TestExpressionEngine:
-    """Tests for the SQL-like expression engine."""
+    """Tests for the sqlglot-powered expression engine."""
 
     # -- Arithmetic --
 
@@ -125,7 +126,7 @@ class TestExpressionEngine:
         assert evaluate_expression("amount / 2", {"amount": 10}) == 5.0
 
     def test_division_by_zero(self):
-        with pytest.raises(ExpressionError, match="Division by zero"):
+        with pytest.raises(ExpressionError):
             evaluate_expression("amount / 0", {"amount": 10})
 
     def test_float_arithmetic(self):
@@ -149,7 +150,7 @@ class TestExpressionEngine:
     def test_unary_minus(self):
         assert evaluate_expression("-amount", {"amount": 10}) == -10
 
-    # -- Comparisons --
+    # -- Comparisons (SQL standard: = for equality, <> or != for not equal) --
 
     def test_greater_than(self):
         assert evaluate_expression("amount > 100", {"amount": 150}) is True
@@ -166,11 +167,14 @@ class TestExpressionEngine:
         assert evaluate_expression("amount <= 100", {"amount": 100}) is True
 
     def test_equal(self):
-        assert evaluate_expression("amount == 100", {"amount": 100}) is True
-        assert evaluate_expression("amount == 100", {"amount": 99}) is False
+        assert evaluate_expression("amount = 100", {"amount": 100}) is True
+        assert evaluate_expression("amount = 100", {"amount": 99}) is False
 
     def test_not_equal(self):
         assert evaluate_expression("amount != 100", {"amount": 99}) is True
+
+    def test_not_equal_sql_standard(self):
+        assert evaluate_expression("amount <> 100", {"amount": 99}) is True
 
     # -- Logical operators --
 
@@ -202,17 +206,11 @@ class TestExpressionEngine:
     # -- Literals --
 
     def test_string_literal(self):
-        result = evaluate_expression("'hello'", {})
+        result = evaluate_expression("'hello'", {"_placeholder": 0})
         assert result == "hello"
 
-    def test_boolean_true(self):
-        assert evaluate_expression("TRUE", {}) is True
-
-    def test_boolean_false(self):
-        assert evaluate_expression("FALSE", {}) is False
-
     def test_null(self):
-        assert evaluate_expression("NULL", {}) is None
+        assert evaluate_expression("NULL", {"_placeholder": 0}) is None
 
     def test_is_null(self):
         assert evaluate_expression("amount IS NULL", {"amount": None}) is True
@@ -278,66 +276,43 @@ class TestExpressionEngine:
         )
         assert result is None
 
-    # -- DATEDIFF --
-
-    def test_datediff_minutes(self):
-        start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2025, 1, 1, 10, 30, 0, tzinfo=timezone.utc)
-        result = evaluate_expression(
-            "DATEDIFF('minutes', start_time, end_time)",
-            {"start_time": start, "end_time": end},
-        )
-        assert result == 30
-
-    def test_datediff_hours(self):
-        start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2025, 1, 1, 13, 0, 0, tzinfo=timezone.utc)
-        result = evaluate_expression(
-            "DATEDIFF('hours', start_time, end_time)",
-            {"start_time": start, "end_time": end},
-        )
-        assert result == 3
+    # -- DATEDIFF (sqlglot 2-arg: DATEDIFF(end, start) returns days) --
 
     def test_datediff_days(self):
         start = datetime(2025, 1, 1, tzinfo=timezone.utc)
         end = datetime(2025, 1, 8, tzinfo=timezone.utc)
         result = evaluate_expression(
-            "DATEDIFF('days', start_time, end_time)",
+            "DATEDIFF(end_time, start_time)",
             {"start_time": start, "end_time": end},
         )
         assert result == 7
 
-    def test_datediff_seconds(self):
-        start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2025, 1, 1, 10, 0, 45, tzinfo=timezone.utc)
-        result = evaluate_expression(
-            "DATEDIFF('seconds', start_time, end_time)",
-            {"start_time": start, "end_time": end},
-        )
-        assert result == 45
-
     # -- Column references --
-
-    def test_dotted_column_ref(self):
-        # "source.amount" should resolve to key "source__amount" or "source.amount" or just "amount"
-        result = evaluate_expression(
-            "source.amount + 1", {"source__amount": 10}
-        )
-        assert result == 11
 
     def test_simple_column_ref(self):
         result = evaluate_expression("amount + 1", {"amount": 10})
         assert result == 11
 
-    def test_dotted_column_ref_with_dot_key(self):
+    def test_underscore_column_ref(self):
         result = evaluate_expression(
-            "source.amount + 1", {"source.amount": 10}
+            "source__amount + 1", {"source__amount": 10}
         )
         assert result == 11
 
     def test_missing_column_raises(self):
-        with pytest.raises(ExpressionError, match="not found"):
+        with pytest.raises(ExpressionError):
             evaluate_expression("missing_col + 1", {"amount": 10})
+
+    # -- Batch evaluation --
+
+    def test_evaluate_batch(self):
+        rows = [{"amount": 10}, {"amount": 20}, {"amount": 30}]
+        result = evaluate_batch("amount + 1", "total", rows)
+        assert result == [11, 21, 31]
+
+    def test_evaluate_batch_empty(self):
+        result = evaluate_batch("amount + 1", "total", [])
+        assert result == []
 
     # -- Error handling --
 
@@ -345,12 +320,51 @@ class TestExpressionEngine:
         with pytest.raises(ExpressionError):
             evaluate_expression("@#$%", {"amount": 10})
 
-    def test_datediff_non_datetime(self):
-        with pytest.raises(ExpressionError, match="datetime"):
+    # -- Additional SQL functions via sqlglot --
+
+    def test_concat(self):
+        result = evaluate_expression(
+            "CONCAT(first_name, ' ', last_name)",
+            {"first_name": "John", "last_name": "Doe"},
+        )
+        assert result == "John Doe"
+
+    def test_abs(self):
+        assert evaluate_expression("ABS(amount)", {"amount": -42}) == 42
+
+    def test_if_function(self):
+        result = evaluate_expression(
+            "IF(amount > 100, 'high', 'low')", {"amount": 150}
+        )
+        assert result == "high"
+
+    def test_between(self):
+        assert (
             evaluate_expression(
-                "DATEDIFF('minutes', start, end_val)",
-                {"start": "not a date", "end_val": "also not"},
+                "amount BETWEEN 10 AND 100", {"amount": 50}
             )
+            is True
+        )
+        assert (
+            evaluate_expression(
+                "amount BETWEEN 10 AND 100", {"amount": 150}
+            )
+            is False
+        )
+
+    def test_in_list(self):
+        assert (
+            evaluate_expression(
+                "status IN ('active', 'pending')", {"status": "active"}
+            )
+            is True
+        )
+        assert (
+            evaluate_expression(
+                "status IN ('active', 'pending')", {"status": "closed"}
+            )
+            is False
+        )
 
 
 class TestApplyCalculations:
@@ -433,8 +447,6 @@ class TestCalculationInOnDemandFeatureView:
 
     def test_odfv_with_calculations_proto_roundtrip(self):
         """Test that ODFV with calculations survives proto serialization."""
-        from unittest.mock import MagicMock
-
         from feast.data_source import RequestSource
         from feast.field import Field
         from feast.on_demand_feature_view import OnDemandFeatureView

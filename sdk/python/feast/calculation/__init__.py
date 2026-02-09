@@ -18,13 +18,18 @@ class Calculation:
     A Calculation describes a computed feature that is applied to an
     OnDemandFeatureView via the `calculations` parameter.
 
-    The expression supports SQL-like syntax including:
-    - Arithmetic: +, -, *, / (e.g., ``"source.amount + 1"``)
-    - Comparisons: >, <, >=, <=, ==, != (e.g., ``"source.amount > 100"``)
+    Expressions use standard SQL syntax, powered by sqlglot. Supported operations:
+    - Arithmetic: +, -, *, / (e.g., ``"amount + 1"``)
+    - Comparisons: >, <, >=, <=, =, !=, <> (e.g., ``"amount > 100"``)
     - Logical operators: AND, OR, NOT
     - CASE statements: ``"CASE WHEN amount > 100 THEN 'high' ELSE 'low' END"``
-    - COALESCE: ``"COALESCE(source.amount, 0)"``
-    - DATEDIFF: ``"DATEDIFF('minutes', source.start_time, source.end_time)"``
+    - COALESCE: ``"COALESCE(amount, 0)"``
+    - DATEDIFF: ``"DATEDIFF(end_time, start_time)"``
+    - IS NULL / IS NOT NULL
+    - String functions: CONCAT, UPPER, LOWER, etc.
+    - Math functions: ABS, ROUND, CEIL, FLOOR, etc.
+    - Conditional: IF(condition, true_val, false_val)
+    - BETWEEN, IN
 
     Attributes:
         name: The name of this calculated feature.
@@ -105,6 +110,8 @@ def apply_calculations(
     """
     Apply a list of Calculation objects to input data.
 
+    Uses sqlglot's executor to evaluate SQL-like expressions in batch.
+
     Args:
         data: Input data as a dict (python mode) or pyarrow Table (pandas mode).
         calculations: List of Calculation objects to evaluate.
@@ -128,13 +135,12 @@ def _apply_calculations_dict(
     data: Dict[str, List[Any]],
     calculations: List[Calculation],
 ) -> Dict[str, List[Any]]:
-    """Apply calculations to dict-based data."""
-    from feast.calculation.expression_engine import evaluate_expression
+    """Apply calculations to dict-based data using sqlglot batch evaluation."""
+    from feast.calculation.expression_engine import evaluate_batch
 
     if not data or not any(len(v) > 0 for v in data.values() if isinstance(v, list)):
         return data
 
-    result = dict(data)
     # Determine the number of rows
     num_rows = 0
     for v in data.values():
@@ -142,12 +148,15 @@ def _apply_calculations_dict(
             num_rows = len(v)
             break
 
+    # Convert columnar dict to list of row dicts for sqlglot
+    rows = [
+        {k: (v[i] if isinstance(v, list) else v) for k, v in data.items()}
+        for i in range(num_rows)
+    ]
+
+    result = dict(data)
     for calc in calculations:
-        computed_values = []
-        for i in range(num_rows):
-            row = {k: (v[i] if isinstance(v, list) else v) for k, v in data.items()}
-            computed_values.append(evaluate_expression(calc.expr, row))
-        result[calc.name] = computed_values
+        result[calc.name] = evaluate_batch(calc.expr, calc.name, rows)
 
     return result
 
@@ -156,21 +165,23 @@ def _apply_calculations_arrow(
     data: "pyarrow.Table",
     calculations: List[Calculation],
 ) -> "pyarrow.Table":
-    """Apply calculations to a pyarrow Table."""
+    """Apply calculations to a pyarrow Table using sqlglot batch evaluation."""
     import pyarrow as pa
 
-    from feast.calculation.expression_engine import evaluate_expression
+    from feast.calculation.expression_engine import evaluate_batch
 
     if data.num_rows == 0:
         return data
 
+    # Convert Arrow table to list of row dicts for sqlglot
+    col_dict = {name: data.column(name).to_pylist() for name in data.column_names}
+    rows = [
+        {k: v[i] for k, v in col_dict.items()} for i in range(data.num_rows)
+    ]
+
     result = data
     for calc in calculations:
-        computed_values = []
-        col_dict = {name: data.column(name).to_pylist() for name in data.column_names}
-        for i in range(data.num_rows):
-            row = {k: v[i] for k, v in col_dict.items()}
-            computed_values.append(evaluate_expression(calc.expr, row))
+        computed_values = evaluate_batch(calc.expr, calc.name, rows)
         result = result.append_column(calc.name, pa.array(computed_values))
 
     return result
