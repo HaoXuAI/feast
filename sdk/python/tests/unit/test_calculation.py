@@ -16,9 +16,10 @@
 
 from datetime import datetime, timezone
 
+import pyarrow as pa
 import pytest
 
-from feast.calculation import Calculation
+from feast.calculation import Calculation, apply_calculations
 from feast.calculation.expression_engine import (
     ExpressionError,
     evaluate_batch,
@@ -364,3 +365,136 @@ class TestExpressionEngine:
             )
             is False
         )
+
+
+class TestApplyCalculations:
+    """Tests for apply_calculations function."""
+
+    def test_apply_to_dict_python_mode(self):
+        data = {
+            "amount": [100, 200, 300],
+            "tax": [10, 20, 30],
+        }
+        calcs = [Calculation(name="total", expr="amount + tax")]
+        result = apply_calculations(data, calcs, "python")
+        assert result["total"] == [110, 220, 330]
+
+    def test_apply_multiple_calculations_dict(self):
+        data = {
+            "amount": [100, 200],
+            "tax": [10, 20],
+        }
+        calcs = [
+            Calculation(name="total", expr="amount + tax"),
+            Calculation(name="is_high", expr="amount > 150"),
+        ]
+        result = apply_calculations(data, calcs, "python")
+        assert result["total"] == [110, 220]
+        assert result["is_high"] == [False, True]
+
+    def test_apply_to_arrow_pandas_mode(self):
+        table = pa.table({"amount": [100, 200, 300], "tax": [10, 20, 30]})
+        calcs = [Calculation(name="total", expr="amount + tax")]
+        result = apply_calculations(table, calcs, "pandas")
+        assert isinstance(result, pa.Table)
+        assert result.column("total").to_pylist() == [110, 220, 330]
+
+    def test_no_calculations_returns_original(self):
+        data = {"amount": [1, 2]}
+        result = apply_calculations(data, [], "python")
+        assert result is data
+
+    def test_empty_data_returns_original(self):
+        data = {"amount": [], "tax": []}
+        calcs = [Calculation(name="total", expr="amount + tax")]
+        result = apply_calculations(data, calcs, "python")
+        assert result == data
+
+    def test_empty_arrow_table_returns_original(self):
+        table = pa.table({"amount": pa.array([], type=pa.int64())})
+        calcs = [Calculation(name="total", expr="amount + 1")]
+        result = apply_calculations(table, calcs, "pandas")
+        assert result.num_rows == 0
+
+    def test_case_expression_in_apply(self):
+        data = {
+            "amount": [50, 150, 250],
+        }
+        calcs = [
+            Calculation(
+                name="tier",
+                expr="CASE WHEN amount > 200 THEN 'premium' WHEN amount > 100 THEN 'standard' ELSE 'basic' END",
+            )
+        ]
+        result = apply_calculations(data, calcs, "python")
+        assert result["tier"] == ["basic", "standard", "premium"]
+
+    def test_coalesce_in_apply(self):
+        data = {
+            "value": [None, 42, None],
+        }
+        calcs = [Calculation(name="safe_value", expr="COALESCE(value, 0)")]
+        result = apply_calculations(data, calcs, "python")
+        assert result["safe_value"] == [0, 42, 0]
+
+    def test_unsupported_mode_raises(self):
+        with pytest.raises(ValueError, match="Unsupported mode"):
+            apply_calculations({"a": [1]}, [Calculation(name="b", expr="a + 1")], "unknown")
+
+
+class TestCalculationInOnDemandFeatureView:
+    """Tests for Calculation integration with OnDemandFeatureView."""
+
+    def test_odfv_with_calculations_proto_roundtrip(self):
+        """Test that ODFV with calculations survives proto serialization."""
+        from feast.data_source import RequestSource
+        from feast.field import Field
+        from feast.on_demand_feature_view import OnDemandFeatureView
+        from feast.transformation.pandas_transformation import PandasTransformation
+        from feast.types import Float64, Int64
+
+        request_source = RequestSource(
+            name="input",
+            schema=[
+                Field(name="amount", dtype=Int64),
+                Field(name="tax", dtype=Int64),
+            ],
+        )
+
+        def dummy_udf(features_df):
+            return features_df
+
+        transformation = PandasTransformation(
+            udf=dummy_udf,
+            udf_string="def dummy_udf(features_df): return features_df",
+        )
+
+        calcs = [
+            Calculation(name="total", expr="amount + tax"),
+            Calculation(name="is_high", expr="amount > 100", tags={"v": "1"}),
+        ]
+
+        odfv = OnDemandFeatureView(
+            name="test_odfv",
+            schema=[Field(name="total", dtype=Float64)],
+            sources=[request_source],
+            feature_transformation=transformation,
+            mode="pandas",
+            calculations=calcs,
+        )
+
+        proto = odfv.to_proto()
+
+        # Verify calculations in proto
+        assert len(proto.spec.calculations) == 2
+        assert proto.spec.calculations[0].name == "total"
+        assert proto.spec.calculations[0].expr == "amount + tax"
+        assert proto.spec.calculations[1].name == "is_high"
+        assert proto.spec.calculations[1].expr == "amount > 100"
+        assert dict(proto.spec.calculations[1].tags) == {"v": "1"}
+
+        # Roundtrip
+        restored = OnDemandFeatureView.from_proto(proto)
+        assert len(restored.calculations) == 2
+        assert restored.calculations[0] == calcs[0]
+        assert restored.calculations[1] == calcs[1]

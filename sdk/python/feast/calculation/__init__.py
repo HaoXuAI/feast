@@ -5,7 +5,7 @@ Provides the Calculation class for defining SQL-like expression-based features
 in OnDemandFeatureViews.
 """
 
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from typeguard import typechecked
 
@@ -102,4 +102,89 @@ class Calculation:
         return f"Calculation(name={self.name}, expr={self.expr})"
 
 
-__all__ = ["Calculation"]
+def apply_calculations(
+    data: Union[Dict[str, List[Any]], "pyarrow.Table"],
+    calculations: List[Calculation],
+    mode: str,
+) -> Union[Dict[str, List[Any]], "pyarrow.Table"]:
+    """
+    Apply a list of Calculation objects to input data.
+
+    Uses sqlglot's executor to evaluate SQL-like expressions in batch.
+
+    Args:
+        data: Input data as a dict (python mode) or pyarrow Table (pandas mode).
+        calculations: List of Calculation objects to evaluate.
+        mode: Execution mode - 'python' or 'pandas'.
+
+    Returns:
+        The data with calculated columns appended.
+    """
+    if not calculations:
+        return data
+
+    if mode == "python":
+        return _apply_calculations_dict(data, calculations)
+    elif mode == "pandas":
+        return _apply_calculations_arrow(data, calculations)
+    else:
+        raise ValueError(f"Unsupported mode for calculations: {mode}")
+
+
+def _apply_calculations_dict(
+    data: Dict[str, List[Any]],
+    calculations: List[Calculation],
+) -> Dict[str, List[Any]]:
+    """Apply calculations to dict-based data using sqlglot batch evaluation."""
+    from feast.calculation.expression_engine import evaluate_batch
+
+    if not data or not any(len(v) > 0 for v in data.values() if isinstance(v, list)):
+        return data
+
+    # Determine the number of rows
+    num_rows = 0
+    for v in data.values():
+        if isinstance(v, list):
+            num_rows = len(v)
+            break
+
+    # Convert columnar dict to list of row dicts for sqlglot
+    rows = [
+        {k: (v[i] if isinstance(v, list) else v) for k, v in data.items()}
+        for i in range(num_rows)
+    ]
+
+    result = dict(data)
+    for calc in calculations:
+        result[calc.name] = evaluate_batch(calc.expr, calc.name, rows)
+
+    return result
+
+
+def _apply_calculations_arrow(
+    data: "pyarrow.Table",
+    calculations: List[Calculation],
+) -> "pyarrow.Table":
+    """Apply calculations to a pyarrow Table using sqlglot batch evaluation."""
+    import pyarrow as pa
+
+    from feast.calculation.expression_engine import evaluate_batch
+
+    if data.num_rows == 0:
+        return data
+
+    # Convert Arrow table to list of row dicts for sqlglot
+    col_dict = {name: data.column(name).to_pylist() for name in data.column_names}
+    rows = [
+        {k: v[i] for k, v in col_dict.items()} for i in range(data.num_rows)
+    ]
+
+    result = data
+    for calc in calculations:
+        computed_values = evaluate_batch(calc.expr, calc.name, rows)
+        result = result.append_column(calc.name, pa.array(computed_values))
+
+    return result
+
+
+__all__ = ["Calculation", "apply_calculations"]
