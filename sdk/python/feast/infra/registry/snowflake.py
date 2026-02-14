@@ -1196,10 +1196,10 @@ class SnowflakeRegistry(BaseRegistry):
     def _infer_fv_classes(self, feature_view):
         if isinstance(feature_view, StreamFeatureView):
             python_class, proto_class = StreamFeatureView, StreamFeatureViewProto
-        elif isinstance(feature_view, FeatureView):
-            python_class, proto_class = FeatureView, FeatureViewProto
         elif isinstance(feature_view, OnDemandFeatureView):
             python_class, proto_class = OnDemandFeatureView, OnDemandFeatureViewProto
+        elif isinstance(feature_view, FeatureView):
+            python_class, proto_class = FeatureView, FeatureViewProto
         else:
             raise ValueError(f"Unexpected feature view type: {type(feature_view)}")
         return python_class, proto_class
@@ -1207,10 +1207,10 @@ class SnowflakeRegistry(BaseRegistry):
     def _infer_fv_table(self, feature_view) -> str:
         if isinstance(feature_view, StreamFeatureView):
             table = "STREAM_FEATURE_VIEWS"
-        elif isinstance(feature_view, FeatureView):
-            table = "FEATURE_VIEWS"
         elif isinstance(feature_view, OnDemandFeatureView):
             table = "ON_DEMAND_FEATURE_VIEWS"
+        elif isinstance(feature_view, FeatureView):
+            table = "FEATURE_VIEWS"
         else:
             raise ValueError(f"Unexpected feature view type: {type(feature_view)}")
         return table

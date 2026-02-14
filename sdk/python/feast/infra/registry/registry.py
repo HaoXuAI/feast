@@ -491,13 +491,13 @@ class Registry(BaseRegistry):
             existing_feature_views_of_same_type = (
                 self.cached_registry_proto.stream_feature_views
             )
-        elif isinstance(feature_view, FeatureView):
-            existing_feature_views_of_same_type = (
-                self.cached_registry_proto.feature_views
-            )
         elif isinstance(feature_view, OnDemandFeatureView):
             existing_feature_views_of_same_type = (
                 self.cached_registry_proto.on_demand_feature_views
+            )
+        elif isinstance(feature_view, FeatureView):
+            existing_feature_views_of_same_type = (
+                self.cached_registry_proto.feature_views
             )
         else:
             raise ValueError(f"Unexpected feature view type: {type(feature_view)}")
@@ -521,7 +521,9 @@ class Registry(BaseRegistry):
                     feature_view.created_timestamp = (
                         existing_feature_view.created_timestamp
                     )
-                    if isinstance(feature_view, (FeatureView, StreamFeatureView)):
+                    if isinstance(
+                        feature_view, (FeatureView, StreamFeatureView)
+                    ) and not isinstance(feature_view, OnDemandFeatureView):
                         feature_view.update_materialization_intervals(
                             existing_feature_view.materialization_intervals
                         )

@@ -341,6 +341,7 @@ class FeatureStore:
         ):
             if (
                 isinstance(fv, FeatureView)
+                and not isinstance(fv, OnDemandFeatureView)
                 and fv.entities
                 and fv.entities[0] == DUMMY_ENTITY_NAME
             ):
@@ -1022,6 +1023,7 @@ class FeatureStore:
                 # BFVs are not handled separately from FVs right now.
                 (isinstance(ob, FeatureView) or isinstance(ob, BatchFeatureView))
                 and not isinstance(ob, StreamFeatureView)
+                and not isinstance(ob, OnDemandFeatureView)
             )
         ]
         sfvs_to_update = [ob for ob in objects if isinstance(ob, StreamFeatureView)]
@@ -1132,6 +1134,7 @@ class FeatureStore:
                 if (
                     (isinstance(ob, FeatureView) or isinstance(ob, BatchFeatureView))
                     and not isinstance(ob, StreamFeatureView)
+                    and not isinstance(ob, OnDemandFeatureView)
                 )
             ]
             odfvs_to_delete = [
@@ -1923,6 +1926,7 @@ class FeatureStore:
     ):
         """
         Push features to a push source. This updates all the feature views that have the push source as stream source.
+        Also triggers real-time computation for any dependent OnDemandFeatureViews.
 
         Args:
             push_source_name: The name of the push source we want to push data to.
@@ -1945,6 +1949,9 @@ class FeatureStore:
                 self.write_to_offline_store(
                     fv.name, df, allow_registry_cache=allow_registry_cache
                 )
+
+        # Trigger real-time compute for dependent ODFVs
+        self._compute_odfvs_from_push(push_source_name, df)
 
     async def push_async(
         self,
@@ -2017,6 +2024,54 @@ class FeatureStore:
                     raise DataFrameSerializationError(df)
 
         return df
+
+    def _get_realtime_compute_engine(self):
+        """Get or create the RealTimeComputeEngine instance."""
+        if not hasattr(self, "_realtime_compute_engine"):
+            from feast.infra.compute_engines.realtime.compute import (
+                RealTimeComputeEngine,
+            )
+
+            provider = self._get_provider()
+            backend = None
+            if hasattr(self.config, "realtime_engine") and self.config.realtime_engine:
+                backend = getattr(self.config.realtime_engine, "backend", None)
+
+            self._realtime_compute_engine = RealTimeComputeEngine(
+                repo_config=self.config,
+                online_store=provider.online_store,
+                backend=backend,
+            )
+        return self._realtime_compute_engine
+
+    def _compute_odfvs_from_push(
+        self,
+        push_source_name: str,
+        df: pd.DataFrame,
+    ) -> None:
+        """
+        Trigger real-time computation for OnDemandFeatureViews that depend on
+        feature views with the given push source.
+
+        Args:
+            push_source_name: Name of the push source that received data.
+            df: The pushed data.
+        """
+        try:
+            engine = self._get_realtime_compute_engine()
+            engine.compute_from_push(
+                push_source_name=push_source_name,
+                df=df,
+                registry=self.registry,
+                project=self.project,
+            )
+        except Exception as e:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Failed to compute dependent ODFVs for push source '{push_source_name}': {e}"
+            )
 
     def _transform_on_demand_feature_view_df(
         self, feature_view: OnDemandFeatureView, df: pd.DataFrame
@@ -2154,10 +2209,10 @@ class FeatureStore:
         if df is not None:
             self._validate_vector_features(feature_view, df)
 
-        # # Apply transformations if this is an OnDemandFeatureView with write_to_online_store=True
+        # Apply transformations if this is an OnDemandFeatureView with online=True
         if (
             isinstance(feature_view, OnDemandFeatureView)
-            and feature_view.write_to_online_store
+            and (feature_view.online or feature_view.write_to_online_store)
             and transform_on_write
         ):
             df = self._transform_on_demand_feature_view_df(feature_view, df)
@@ -2398,6 +2453,7 @@ class FeatureStore:
             Mapping[str, Union[Sequence[Any], Sequence[Value], RepeatedValue]],
         ],
         full_feature_names: bool = False,
+        transform: bool = False,
     ) -> OnlineResponse:
         """
         Retrieves the latest online feature data.
@@ -2418,6 +2474,9 @@ class FeatureStore:
             full_feature_names: If True, feature names will be prefixed with the corresponding feature view name,
                 changing them from the format "feature" to "feature_view__feature" (e.g. "daily_transactions"
                 changes to "customer_fv__daily_transactions").
+            transform: If True, force recomputation of OnDemandFeatureView transformations at
+                serving time instead of reading cached results from the online store.
+                Default is False (read from cache).
 
         Returns:
             OnlineResponse containing the feature data in records.
@@ -2451,6 +2510,99 @@ class FeatureStore:
             full_feature_names=full_feature_names,
         )
 
+        # If transform=True, apply ODFV transformations on top of the response
+        if transform:
+            response = self._apply_odfv_transformations(
+                features=features,
+                response=response,
+                full_feature_names=full_feature_names,
+            )
+
+        return response
+
+    def _apply_odfv_transformations(
+        self,
+        features: Union[List[str], FeatureService],
+        response: OnlineResponse,
+        full_feature_names: bool = False,
+    ) -> OnlineResponse:
+        """
+        Apply ODFV transformations to the online response when transform=True.
+
+        This fetches source features from the online response, executes the ODFV
+        transformations, and merges the results back into the response.
+
+        Args:
+            features: The requested features.
+            response: The online response from the provider.
+            full_feature_names: Whether to use full feature names.
+
+        Returns:
+            Updated OnlineResponse with transformed ODFV features.
+        """
+        # Parse feature references to find ODFV features
+        feature_refs = features if isinstance(features, list) else []
+        if hasattr(features, "feature_view_projections"):
+            # FeatureService
+            feature_refs = []
+            for projection in features.feature_view_projections:
+                for feature in projection.features:
+                    feature_refs.append(f"{projection.name}:{feature.name}")
+
+        # Find requested ODFVs
+        requested_odfvs = OnDemandFeatureView.get_requested_odfvs(
+            feature_refs, self.project, self.registry
+        )
+
+        if not requested_odfvs:
+            return response
+
+        # Get the response as a dict for manipulation
+        response_dict = response.to_dict()
+
+        engine = self._get_realtime_compute_engine()
+
+        for odfv in requested_odfvs:
+            # Build input dict from source features in the response
+            input_dict: Dict[str, list] = {}
+            for source_name, projection in odfv.source_feature_view_projections.items():
+                for feature in projection.features:
+                    # Try both full and short feature names
+                    full_name = f"{source_name}__{feature.name}"
+                    short_name = feature.name
+                    if full_name in response_dict:
+                        input_dict[full_name] = response_dict[full_name]
+                        input_dict[short_name] = response_dict[full_name]
+                    elif short_name in response_dict:
+                        input_dict[short_name] = response_dict[short_name]
+                        input_dict[full_name] = response_dict[short_name]
+
+            # Add request source features if they exist in the response
+            for source_name, req_source in odfv.source_request_sources.items():
+                for field in req_source.schema:
+                    if field.name in response_dict:
+                        input_dict[field.name] = response_dict[field.name]
+
+            if input_dict:
+                try:
+                    transformed = engine.transform_dict(odfv, input_dict)
+
+                    # Merge transformed features into response dict
+                    for feature in odfv.features:
+                        if full_feature_names:
+                            key = f"{odfv.projection.name_to_use()}__{feature.name}"
+                        else:
+                            key = feature.name
+                        if feature.name in transformed:
+                            response_dict[key] = transformed[feature.name]
+                except Exception:
+                    import logging
+
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Failed to transform ODFV '{odfv.name}' at serving time"
+                    )
+
         return response
 
     async def get_online_features_async(
@@ -2461,6 +2613,7 @@ class FeatureStore:
             Mapping[str, Union[Sequence[Any], Sequence[Value], RepeatedValue]],
         ],
         full_feature_names: bool = False,
+        transform: bool = False,
     ) -> OnlineResponse:
         """
         [Alpha] Retrieves the latest online feature data asynchronously.
@@ -2481,6 +2634,8 @@ class FeatureStore:
             full_feature_names: If True, feature names will be prefixed with the corresponding feature view name,
                 changing them from the format "feature" to "feature_view__feature" (e.g. "daily_transactions"
                 changes to "customer_fv__daily_transactions").
+            transform: If True, force recomputation of OnDemandFeatureView transformations at
+                serving time instead of reading cached results from the online store.
 
         Returns:
             OnlineResponse containing the feature data in records.
@@ -2490,7 +2645,7 @@ class FeatureStore:
         """
         provider = self._get_provider()
 
-        return await provider.get_online_features_async(
+        response = await provider.get_online_features_async(
             config=self.config,
             features=features,
             entity_rows=entity_rows,
@@ -2498,6 +2653,15 @@ class FeatureStore:
             project=self.project,
             full_feature_names=full_feature_names,
         )
+
+        if transform:
+            response = self._apply_odfv_transformations(
+                features=features,
+                response=response,
+                full_feature_names=full_feature_names,
+            )
+
+        return response
 
     def retrieve_online_documents(
         self,

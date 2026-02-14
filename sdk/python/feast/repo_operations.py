@@ -154,25 +154,10 @@ def parse_repo(repo_root: Path) -> RepoContents:
                         (batch_source is ds) for ds in res.data_sources
                     ):
                         res.data_sources.append(batch_source)
-            if (
-                isinstance(obj, FeatureView)
-                and not any((obj is fv) for fv in res.feature_views)
-                and not isinstance(obj, StreamFeatureView)
-                and not isinstance(obj, BatchFeatureView)
+            if isinstance(obj, OnDemandFeatureView) and not any(
+                (obj is odfv) for odfv in res.on_demand_feature_views
             ):
-                res.feature_views.append(obj)
-
-                # Handle batch sources defined with feature views.
-                batch_source = obj.batch_source
-                assert batch_source
-                if not any((batch_source is ds) for ds in res.data_sources):
-                    res.data_sources.append(batch_source)
-
-                # Handle stream sources defined with feature views.
-                if obj.stream_source:
-                    stream_source = obj.stream_source
-                    if not any((stream_source is ds) for ds in res.data_sources):
-                        res.data_sources.append(stream_source)
+                res.on_demand_feature_views.append(obj)
             elif isinstance(obj, StreamFeatureView) and not any(
                 (obj is sfv) for sfv in res.stream_feature_views
             ):
@@ -197,6 +182,23 @@ def parse_repo(repo_root: Path) -> RepoContents:
                 batch_source = obj.batch_source
                 if not any((batch_source is ds) for ds in res.data_sources):
                     res.data_sources.append(batch_source)
+            elif (
+                isinstance(obj, FeatureView)
+                and not any((obj is fv) for fv in res.feature_views)
+            ):
+                res.feature_views.append(obj)
+
+                # Handle batch sources defined with feature views.
+                batch_source = obj.batch_source
+                assert batch_source
+                if not any((batch_source is ds) for ds in res.data_sources):
+                    res.data_sources.append(batch_source)
+
+                # Handle stream sources defined with feature views.
+                if obj.stream_source:
+                    stream_source = obj.stream_source
+                    if not any((stream_source is ds) for ds in res.data_sources):
+                        res.data_sources.append(stream_source)
             elif isinstance(obj, Entity) and not any(
                 (obj is entity) for entity in res.entities
             ):
@@ -205,10 +207,6 @@ def parse_repo(repo_root: Path) -> RepoContents:
                 (obj is fs) for fs in res.feature_services
             ):
                 res.feature_services.append(obj)
-            elif isinstance(obj, OnDemandFeatureView) and not any(
-                (obj is odfv) for odfv in res.on_demand_feature_views
-            ):
-                res.on_demand_feature_views.append(obj)
             elif isinstance(obj, Permission) and not any(
                 (obj is p) for p in res.permissions
             ):

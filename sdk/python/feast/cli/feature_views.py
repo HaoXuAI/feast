@@ -54,11 +54,11 @@ def feature_view_list(ctx: click.Context, tags: list[str]):
         *store.list_on_demand_feature_views(tags=tags_filter),
     ]:
         entities = set()
-        if isinstance(feature_view, FeatureView):
-            entities.update(feature_view.entities)
-        elif isinstance(feature_view, OnDemandFeatureView):
+        if isinstance(feature_view, OnDemandFeatureView):
             for backing_fv in feature_view.source_feature_view_projections.values():
                 entities.update(store.get_feature_view(backing_fv.name).entities)
+        elif isinstance(feature_view, FeatureView):
+            entities.update(feature_view.entities)
         table.append(
             [
                 feature_view.name,

@@ -802,10 +802,10 @@ class SqlRegistry(CachingRegistry):
     def _infer_fv_table(self, feature_view):
         if isinstance(feature_view, StreamFeatureView):
             table = stream_feature_views
-        elif isinstance(feature_view, FeatureView):
-            table = feature_views
         elif isinstance(feature_view, OnDemandFeatureView):
             table = on_demand_feature_views
+        elif isinstance(feature_view, FeatureView):
+            table = feature_views
         else:
             raise ValueError(f"Unexpected feature view type: {type(feature_view)}")
         return table
@@ -813,10 +813,10 @@ class SqlRegistry(CachingRegistry):
     def _infer_fv_classes(self, feature_view):
         if isinstance(feature_view, StreamFeatureView):
             python_class, proto_class = StreamFeatureView, StreamFeatureViewProto
-        elif isinstance(feature_view, FeatureView):
-            python_class, proto_class = FeatureView, FeatureViewProto
         elif isinstance(feature_view, OnDemandFeatureView):
             python_class, proto_class = OnDemandFeatureView, OnDemandFeatureViewProto
+        elif isinstance(feature_view, FeatureView):
+            python_class, proto_class = FeatureView, FeatureViewProto
         else:
             raise ValueError(f"Unexpected feature view type: {type(feature_view)}")
         return python_class, proto_class
@@ -952,7 +952,9 @@ class SqlRegistry(CachingRegistry):
                         )
                         if hasattr(obj, "last_updated_timestamp"):
                             obj.last_updated_timestamp = update_datetime
-                        if isinstance(obj, (FeatureView, StreamFeatureView)):
+                        if isinstance(
+                            obj, (FeatureView, StreamFeatureView)
+                        ) and not isinstance(obj, OnDemandFeatureView):
                             obj.update_materialization_intervals(
                                 type(obj)
                                 .from_proto(deserialized_proto)

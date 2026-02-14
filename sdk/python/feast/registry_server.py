@@ -149,11 +149,11 @@ def _build_any_feature_view_proto(feature_view: BaseFeatureView):
     if isinstance(feature_view, StreamFeatureView):
         arg_name = "stream_feature_view"
         feature_view_proto = feature_view.to_proto()
-    elif isinstance(feature_view, FeatureView):
-        arg_name = "feature_view"
-        feature_view_proto = feature_view.to_proto()
     elif isinstance(feature_view, OnDemandFeatureView):
         arg_name = "on_demand_feature_view"
+        feature_view_proto = feature_view.to_proto()
+    elif isinstance(feature_view, FeatureView):
+        arg_name = "feature_view"
         feature_view_proto = feature_view.to_proto()
 
     return RegistryServer_pb2.AnyFeatureView(

@@ -52,6 +52,10 @@ BATCH_ENGINE_CLASS_FOR_TYPE = {
     "ray.engine": "feast.infra.compute_engines.ray.compute.RayComputeEngine",
 }
 
+REALTIME_ENGINE_CLASS_FOR_TYPE = {
+    "local": "feast.infra.compute_engines.realtime.compute.RealTimeComputeEngine",
+}
+
 LEGACY_ONLINE_STORE_CLASS_FOR_TYPE = {
     "feast.infra.online_stores.contrib.postgres.PostgreSQLOnlineStore": "feast.infra.online_stores.postgres_online_store.PostgreSQLOnlineStore",
     "feast.infra.online_stores.contrib.hbase_online_store.hbase.HbaseOnlineStore": "feast.infra.online_stores.hbase_online_store.hbase.HbaseOnlineStore",
@@ -286,6 +290,9 @@ class RepoConfig(FeastBaseModel):
     batch_engine_config: Any = Field(None, alias="batch_engine")
     """ BatchMaterializationEngine: Batch materialization configuration (optional depending on provider)"""
 
+    realtime_engine_config: Any = Field(None, alias="realtime_engine")
+    """ RealTimeComputeEngine: Real-time compute engine configuration for ODFV transformations (optional) """
+
     feature_server: Optional[Any] = None
     """ FeatureServerConfig: Feature server configuration (optional depending on provider) """
 
@@ -344,6 +351,12 @@ class RepoConfig(FeastBaseModel):
         else:
             # Defaults to using local in-process materialization engine.
             self.batch_engine_config = "local"
+
+        self._realtime_engine = None
+        if "realtime_engine" in data:
+            self.realtime_engine_config = data["realtime_engine"]
+        elif "realtime_engine_config" in data:
+            self.realtime_engine_config = data["realtime_engine_config"]
 
         if isinstance(self.feature_server, Dict):
             self.feature_server = get_feature_server_config_from_type(
@@ -457,6 +470,22 @@ class RepoConfig(FeastBaseModel):
                 self._batch_engine = self._batch_engine
 
         return self._batch_engine
+
+    @property
+    def realtime_engine(self):
+        if not self._realtime_engine:
+            if isinstance(self.realtime_engine_config, Dict):
+                self._realtime_engine = get_realtime_engine_config_from_type(
+                    self.realtime_engine_config["type"]
+                )(**self.realtime_engine_config)
+            elif isinstance(self.realtime_engine_config, str):
+                self._realtime_engine = get_realtime_engine_config_from_type(
+                    self.realtime_engine_config
+                )()
+            elif self.realtime_engine_config:
+                self._realtime_engine = self.realtime_engine_config
+
+        return self._realtime_engine
 
     @property
     def openlineage(self) -> Optional[OpenLineageConfig]:
@@ -671,6 +700,17 @@ def get_batch_engine_config_from_type(batch_engine_type: str):
         assert batch_engine_type.endswith("Engine")
     module_name, batch_engine_class_type = batch_engine_type.rsplit(".", 1)
     config_class_name = f"{batch_engine_class_type}Config"
+
+    return import_class(module_name, config_class_name, config_class_name)
+
+
+def get_realtime_engine_config_from_type(realtime_engine_type: str):
+    if realtime_engine_type in REALTIME_ENGINE_CLASS_FOR_TYPE:
+        realtime_engine_type = REALTIME_ENGINE_CLASS_FOR_TYPE[realtime_engine_type]
+    else:
+        assert realtime_engine_type.endswith("Engine")
+    module_name, realtime_engine_class_type = realtime_engine_type.rsplit(".", 1)
+    config_class_name = f"{realtime_engine_class_type}Config"
 
     return import_class(module_name, config_class_name, config_class_name)
 

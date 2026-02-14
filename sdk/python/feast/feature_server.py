@@ -108,6 +108,7 @@ class GetOnlineFeaturesRequest(BaseModel):
     feature_service: Optional[str] = None
     features: List[str] = []
     full_feature_names: bool = False
+    transform: bool = False
 
 
 class GetOnlineDocumentsRequest(BaseModel):
@@ -332,6 +333,7 @@ def get_app(
             features=features,
             entity_rows=request.entities,
             full_feature_names=request.full_feature_names,
+            transform=request.transform,
         )
 
         if store._get_provider().async_supported.online.read:
