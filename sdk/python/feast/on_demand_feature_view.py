@@ -1,6 +1,7 @@
 import copy
 import functools
 import warnings
+from datetime import timedelta
 from types import FunctionType
 from typing import Any, List, Optional, Union, cast
 
@@ -143,7 +144,10 @@ class OnDemandFeatureView(BaseFeatureView):
     description: str
     tags: dict[str, str]
     owner: str
-    write_to_online_store: bool
+    online: bool
+    offline: bool
+    ttl: Optional[timedelta]
+    write_to_online_store: bool  # Deprecated: use online instead
     singleton: bool
     udf: Optional[FunctionType]
     udf_string: Optional[str]
@@ -163,6 +167,9 @@ class OnDemandFeatureView(BaseFeatureView):
         description: str = "",
         tags: Optional[dict[str, str]] = None,
         owner: str = "",
+        online: Optional[bool] = None,
+        offline: bool = False,
+        ttl: Optional[timedelta] = timedelta(0),
         write_to_online_store: bool = False,
         singleton: bool = False,
         aggregations: Optional[List[Aggregation]] = None,
@@ -187,8 +194,14 @@ class OnDemandFeatureView(BaseFeatureView):
             tags (optional): A dictionary of key-value pairs to store arbitrary metadata.
             owner (optional): The owner of the on demand feature view, typically the email
                 of the primary maintainer.
-            write_to_online_store (optional): A boolean that indicates whether to write the on demand feature view to
-            the online store for faster retrieval.
+            online (optional): Whether to write computed features to the online store.
+                If not specified, falls back to write_to_online_store for backward compatibility.
+            offline (optional): Whether to write computed features to the offline store.
+            ttl (optional): Time-to-live for cached ODFV results. Defaults to 0 (infinite),
+                since ODFV results depend on current source features and never age independently.
+            write_to_online_store (optional): Deprecated. Use online=True instead.
+                A boolean that indicates whether to write the on demand feature view to
+                the online store for faster retrieval.
             singleton (optional): A boolean that indicates whether the transformation is executed on a singleton
                 (only applicable when mode="python").
             aggregations (optional): List of aggregations to apply before transformation.
@@ -251,7 +264,26 @@ class OnDemandFeatureView(BaseFeatureView):
         self.feature_transformation = (
             feature_transformation or self.get_feature_transformation()
         )
-        self.write_to_online_store = write_to_online_store
+
+        # Handle online flag with backward compatibility
+        if online is not None:
+            self.online = online
+        elif write_to_online_store:
+            self.online = True
+            warnings.warn(
+                "write_to_online_store is deprecated. Use online=True instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
+            self.online = False
+
+        self.offline = offline
+        self.ttl = ttl
+
+        # Keep write_to_online_store for backward compatibility
+        self.write_to_online_store = write_to_online_store or self.online
+
         self.singleton = singleton
         if self.singleton and self.mode != "python":
             raise ValueError(
@@ -318,7 +350,9 @@ class OnDemandFeatureView(BaseFeatureView):
             description=self.description,
             tags=self.tags,
             owner=self.owner,
-            write_to_online_store=self.write_to_online_store,
+            online=self.online,
+            offline=self.offline,
+            ttl=self.ttl,
             singleton=self.singleton,
         )
         fv.entities = self.entities
@@ -344,7 +378,9 @@ class OnDemandFeatureView(BaseFeatureView):
             or self.source_request_sources != other.source_request_sources
             or self.mode != other.mode
             or self.feature_transformation != other.feature_transformation
-            or self.write_to_online_store != other.write_to_online_store
+            or self.online != other.online
+            or self.offline != other.offline
+            or self.ttl != other.ttl
             or sorted(self.entity_columns) != sorted(other.entity_columns)
             or self.singleton != other.singleton
             or self.aggregations != other.aggregations
@@ -384,8 +420,8 @@ class OnDemandFeatureView(BaseFeatureView):
         self._validate_transformation_config()
 
     def _validate_online_store_config(self) -> None:
-        """Validate write_to_online_store configuration."""
-        if self.write_to_online_store and not self.entities:
+        """Validate online store configuration."""
+        if self.online and not self.entities:
             raise ValueError(ODFVErrorMessages.online_store_requires_entities())
 
     def _validate_singleton_config(self) -> None:
@@ -504,7 +540,7 @@ class OnDemandFeatureView(BaseFeatureView):
             description=self.description,
             tags=self.tags,
             owner=self.owner,
-            write_to_online_store=self.write_to_online_store,
+            write_to_online_store=self.online,
             singleton=self.singleton if self.singleton else False,
             aggregations=self.aggregations,
         )
@@ -549,7 +585,8 @@ class OnDemandFeatureView(BaseFeatureView):
             description=on_demand_feature_view_proto.spec.description,
             tags=dict(on_demand_feature_view_proto.spec.tags),
             owner=on_demand_feature_view_proto.spec.owner,
-            write_to_online_store=optional_fields["write_to_online_store"],
+            online=optional_fields["online"],
+            offline=optional_fields["offline"],
             singleton=optional_fields["singleton"],
             aggregations=optional_fields["aggregations"],
         )
@@ -674,10 +711,13 @@ class OnDemandFeatureView(BaseFeatureView):
         """Parse optional fields from protobuf with appropriate defaults."""
         spec = proto.spec
 
-        # Parse write_to_online_store
-        write_to_online_store = False
+        # Parse write_to_online_store -> maps to online flag
+        online = False
         if hasattr(spec, "write_to_online_store"):
-            write_to_online_store = spec.write_to_online_store
+            online = spec.write_to_online_store
+
+        # Parse offline (not yet in proto, defaults to False)
+        offline = False
 
         # Parse entities
         entities = []
@@ -705,7 +745,8 @@ class OnDemandFeatureView(BaseFeatureView):
             ]
 
         return {
-            "write_to_online_store": write_to_online_store,
+            "online": online,
+            "offline": offline,
             "entities": entities,
             "entity_columns": entity_columns,
             "singleton": singleton,
@@ -1136,6 +1177,9 @@ def on_demand_feature_view(
     description: str = "",
     tags: Optional[dict[str, str]] = None,
     owner: str = "",
+    online: Optional[bool] = None,
+    offline: bool = False,
+    ttl: Optional[timedelta] = timedelta(0),
     write_to_online_store: bool = False,
     singleton: bool = False,
     explode: bool = False,
@@ -1156,8 +1200,10 @@ def on_demand_feature_view(
         tags (optional): A dictionary of key-value pairs to store arbitrary metadata.
         owner (optional): The owner of the on demand feature view, typically the email
             of the primary maintainer.
-        write_to_online_store (optional): A boolean that indicates whether to write the on demand feature view to
-            the online store for faster retrieval.
+        online (optional): Whether to write computed features to the online store.
+        offline (optional): Whether to write computed features to the offline store.
+        ttl (optional): Time-to-live for cached ODFV results. Defaults to 0 (infinite).
+        write_to_online_store (optional): Deprecated. Use online=True instead.
         singleton (optional): A boolean that indicates whether the transformation is executed on a singleton
             (only applicable when mode="python").
         explode (optional): A boolean that indicates whether the transformation explodes the input data into multiple rows.
@@ -1181,6 +1227,9 @@ def on_demand_feature_view(
             description=description,
             tags=tags,
             owner=owner,
+            online=online,
+            offline=offline,
+            ttl=ttl,
             write_to_online_store=write_to_online_store,
             entities=entities,
             singleton=singleton,
