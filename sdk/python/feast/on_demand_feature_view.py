@@ -10,6 +10,7 @@ from typeguard import typechecked
 
 from feast.aggregation import Aggregation
 from feast.base_feature_view import BaseFeatureView
+from feast.calculation import Calculation
 from feast.data_source import RequestSource
 from feast.entity import Entity
 from feast.errors import RegistryInferenceFailure, SpecifiedFeaturesNotPresentError
@@ -146,6 +147,7 @@ class OnDemandFeatureView(BaseFeatureView):
     udf: Optional[FunctionType]
     udf_string: Optional[str]
     aggregations: List[Aggregation]
+    calculations: List[Calculation]
 
     def __init__(  # noqa: C901
         self,
@@ -164,6 +166,7 @@ class OnDemandFeatureView(BaseFeatureView):
         write_to_online_store: bool = False,
         singleton: bool = False,
         aggregations: Optional[List[Aggregation]] = None,
+        calculations: Optional[List[Calculation]] = None,
     ):
         """
         Creates an OnDemandFeatureView object.
@@ -190,6 +193,7 @@ class OnDemandFeatureView(BaseFeatureView):
             singleton (optional): A boolean that indicates whether the transformation is executed on a singleton
                 (only applicable when mode="python").
             aggregations (optional): List of aggregations to apply before transformation.
+            calculations (optional): List of calculations (SQL-like expressions) to apply.
         """
         super().__init__(
             name=name,
@@ -256,6 +260,7 @@ class OnDemandFeatureView(BaseFeatureView):
                 ODFVErrorMessages.singleton_mode_requires_python(self.mode)
             )
         self.aggregations = aggregations or []
+        self.calculations = calculations or []
 
     def _add_source_to_collections(self, odfv_source: OnDemandSourceType) -> None:
         """
@@ -318,6 +323,7 @@ class OnDemandFeatureView(BaseFeatureView):
             owner=self.owner,
             write_to_online_store=self.write_to_online_store,
             singleton=self.singleton,
+            calculations=self.calculations,
         )
         fv.entities = self.entities
         fv.features = self.features
@@ -346,6 +352,7 @@ class OnDemandFeatureView(BaseFeatureView):
             or sorted(self.entity_columns) != sorted(other.entity_columns)
             or self.singleton != other.singleton
             or self.aggregations != other.aggregations
+            or self.calculations != other.calculations
         ):
             return False
 
@@ -487,6 +494,7 @@ class OnDemandFeatureView(BaseFeatureView):
             write_to_online_store=self.write_to_online_store,
             singleton=self.singleton or False,
             aggregations=self.aggregations,
+            calculations=[calc.to_proto() for calc in self.calculations],
         )
         return OnDemandFeatureViewProto(spec=spec, meta=meta)
 
@@ -532,6 +540,7 @@ class OnDemandFeatureView(BaseFeatureView):
             write_to_online_store=optional_fields["write_to_online_store"],
             singleton=optional_fields["singleton"],
             aggregations=optional_fields["aggregations"],
+            calculations=optional_fields["calculations"],
         )
 
         # Set additional attributes that aren't part of the constructor
@@ -684,12 +693,21 @@ class OnDemandFeatureView(BaseFeatureView):
                 for aggregation_proto in spec.aggregations
             ]
 
+        # Parse calculations
+        calculations = []
+        if hasattr(spec, "calculations"):
+            calculations = [
+                Calculation.from_proto(calc_proto)
+                for calc_proto in spec.calculations
+            ]
+
         return {
             "write_to_online_store": write_to_online_store,
             "entities": entities,
             "entity_columns": entity_columns,
             "singleton": singleton,
             "aggregations": aggregations,
+            "calculations": calculations,
         }
 
     @classmethod
@@ -812,6 +830,14 @@ class OnDemandFeatureView(BaseFeatureView):
             pa_table, self.features
         )
 
+        # Apply calculations if any
+        if self.calculations:
+            from feast.calculation import apply_calculations
+
+            transformed_table = apply_calculations(
+                transformed_table, self.calculations, "pandas"
+            )
+
         # Clean up temporary columns and apply final renaming
         return self._postprocess_arrow_table(
             transformed_table, columns_to_cleanup, full_feature_names
@@ -899,6 +925,14 @@ class OnDemandFeatureView(BaseFeatureView):
             )
         else:
             output_dict = self.feature_transformation.transform(preprocessed_dict)
+
+        # Apply calculations if any
+        if self.calculations:
+            from feast.calculation import apply_calculations
+
+            output_dict = apply_calculations(
+                output_dict, self.calculations, "python"
+            )
 
         # Clean up temporary columns
         for feature_name in columns_to_cleanup:
